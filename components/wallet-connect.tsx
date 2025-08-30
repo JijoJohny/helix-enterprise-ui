@@ -1,6 +1,8 @@
 "use client"
 
 import type React from "react"
+import { useRouter } from "next/navigation"
+import { useWallet } from "@/components/wallet-store"
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
@@ -8,6 +10,15 @@ type EthereumProvider = {
   request: (args: { method: string; params?: unknown[] | Record<string, unknown> }) => Promise<any>
   on?: (event: string, handler: (...args: any[]) => void) => void
   removeListener?: (event: string, handler: (...args: any[]) => void) => void
+}
+
+const AVALANCHE_HEX_CHAIN_ID = "0xa86a" // 43114
+const AVALANCHE_PARAMS = {
+  chainId: AVALANCHE_HEX_CHAIN_ID,
+  chainName: "Avalanche C-Chain",
+  nativeCurrency: { name: "Avalanche", symbol: "AVAX", decimals: 18 },
+  rpcUrls: ["https://api.avax.network/ext/bc/C/rpc"],
+  blockExplorerUrls: ["https://snowtrace.io/"],
 }
 
 function truncateAddress(addr: string) {
@@ -24,7 +35,8 @@ export default function WalletConnect({
   connectedClassName?: string
   children?: React.ReactNode
 }) {
-  const [account, setAccount] = useState<string | null>(null)
+  const router = useRouter()
+  const { address, setAddress } = useWallet()
   const [chainId, setChainId] = useState<string | null>(null)
   const [connecting, setConnecting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -38,7 +50,6 @@ export default function WalletConnect({
     providerRef.current = eth ?? null
 
     if (!eth) {
-      // MetaMask not installed; show a helpful message on connect
       return
     }
     ;(async () => {
@@ -48,7 +59,7 @@ export default function WalletConnect({
           eth.request({ method: "eth_chainId" }),
         ])
         if (!mounted) return
-        if (Array.isArray(accounts) && accounts.length > 0) setAccount(accounts[0])
+        if (Array.isArray(accounts) && accounts.length > 0) setAddress(accounts[0])
         if (typeof currentChainId === "string") setChainId(currentChainId)
       } catch {
         // Ignore prefetch errors
@@ -56,7 +67,7 @@ export default function WalletConnect({
     })()
 
     const handleAccountsChanged = (accounts: string[]) => {
-      setAccount(accounts?.[0] ?? null)
+      setAddress(accounts?.[0] ?? null)
     }
     const handleChainChanged = (cid: string) => {
       setChainId(cid)
@@ -70,7 +81,7 @@ export default function WalletConnect({
       eth?.removeListener?.("accountsChanged", handleAccountsChanged)
       eth?.removeListener?.("chainChanged", handleChainChanged)
     }
-  }, [])
+  }, [setAddress])
 
   const handleConnect = useCallback(async () => {
     setError(null)
@@ -84,39 +95,66 @@ export default function WalletConnect({
       if (!Array.isArray(accounts) || accounts.length === 0) {
         throw new Error("No accounts were returned by MetaMask.")
       }
-      setAccount(accounts[0])
+      setAddress(accounts[0])
 
       const cid = await provider.request({ method: "eth_chainId" })
       if (typeof cid === "string") {
         setChainId(cid)
       }
+
+      try {
+        if (cid !== AVALANCHE_HEX_CHAIN_ID) {
+          await provider.request({
+            method: "wallet_switchEthereumChain",
+            params: [{ chainId: AVALANCHE_HEX_CHAIN_ID }],
+          })
+          setChainId(AVALANCHE_HEX_CHAIN_ID)
+        }
+      } catch (switchErr: any) {
+        // If the chain has not been added to MetaMask, add it then switch
+        if (switchErr?.code === 4902 || /wallet_addEthereumChain/i.test(String(switchErr?.message))) {
+          await provider.request({
+            method: "wallet_addEthereumChain",
+            params: [AVALANCHE_PARAMS],
+          })
+          await provider.request({
+            method: "wallet_switchEthereumChain",
+            params: [{ chainId: AVALANCHE_HEX_CHAIN_ID }],
+          })
+          setChainId(AVALANCHE_HEX_CHAIN_ID)
+        } else {
+          throw switchErr
+        }
+      }
+
+      router.push("/post-connect")
     } catch (e: any) {
       setError(e?.message ?? "Failed to connect wallet.")
     } finally {
       setConnecting(false)
     }
-  }, [])
+  }, [router, setAddress])
 
   const handleDisconnect = useCallback(() => {
     // MetaMask has no programmatic disconnect; clear UI state
-    setAccount(null)
+    setAddress(null)
     setChainId(null)
     setError(null)
-  }, [])
+  }, [setAddress])
 
   const label = useMemo(() => {
     if (connecting) return "Connecting..."
-    if (account) return truncateAddress(account)
+    if (address) return truncateAddress(address)
     return "Connect Wallet"
-  }, [connecting, account])
+  }, [connecting, address])
 
   return (
     <div className="flex items-center gap-3">
-      {account ? (
+      {address ? (
         <button
           type="button"
           className={connectedClassName}
-          aria-label={`Connected: ${truncateAddress(account)}${chainId ? ` on ${chainId}` : ""}`}
+          aria-label={`Connected: ${truncateAddress(address)}${chainId ? ` on ${chainId}` : ""}`}
           title={chainId ? `Chain: ${chainId}` : undefined}
           onClick={handleDisconnect}
         >
